@@ -19,7 +19,7 @@ class Order(int, IndexEnum):
 
 
 @unique
-class Attr(str, IndexEnum):
+class Attr(str, IndexEnum):  # noqa: SLOT000
     GEO2D = pymongo.GEO2D
     """二维地理空间索引"""
     GEOSPHERE = pymongo.GEOSPHERE

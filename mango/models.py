@@ -5,14 +5,14 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import bson
 from bson import ObjectId
-from pydantic import BaseModel
-from pydantic.main import ModelMetaclass
+from pydantic import BaseModel, ConfigDict
+from pydantic._internal._model_construction import ModelMetaclass
 from typing_extensions import Self, dataclass_transform
 
 from mango.encoder import Encoder
 from mango.expression import Expression, ExpressionField, Operators
 from mango.fields import Field, FieldInfo, ObjectIdField
-from mango.meta import MetaConfig, inherit_meta
+from mango.meta import MetaConfig
 from mango.result import AggregateResult, FindMapping, FindResult
 from mango.source import Mango
 from mango.stage import Pipeline
@@ -20,7 +20,6 @@ from mango.utils import add_fields, all_check, validate_fields
 
 if TYPE_CHECKING:
     from bson.codec_options import CodecOptions
-    from pydantic.fields import ModelField
     from pymongo.results import DeleteResult, UpdateResult
 
     from mango.drive import Collection, Database
@@ -44,8 +43,18 @@ def is_need_default_pk(
 
 
 def set_default_pk(model: type["Document"]) -> None:
-    value = Field(default_factory=ObjectId, allow_mutation=False, init=False)
-    add_fields(model, id=(ObjectIdField, value))
+    add_fields(
+        model,
+        id=(
+            ObjectIdField,
+            {
+                "default_factory": ObjectId,
+                "primary_key": True,
+                "frozen": True,
+                "init": False,
+            },
+        ),
+    )
     model.__primary_key__ = "id"
 
 
@@ -66,11 +75,34 @@ def flat_filter(data: Mapping[str, Any]) -> dict[str, Any]:
 
 def merge_map(data: MutableMapping[Any, Any], into: Mapping[Any, Any]) -> None:
     for k, v in into.items():
-        k = str(k)
+        k = str(k)  # noqa: PLW2901
         if isinstance(data.get(k), dict) and isinstance(v, dict | EmbeddedDocument):
-            merge_map(data[k], v if isinstance(v, dict) else v.dict())
+            merge_map(data[k], v if isinstance(v, dict) else v.model_dump())
         else:
             data[k] = v
+
+
+config_keys = set(MetaConfig.__annotations__.keys())
+
+
+def merge_config(
+    bases: tuple[type[Any], ...], attrs: dict[str, Any], kwargs: dict[str, Any]
+) -> MetaConfig:
+    config = MetaConfig()
+
+    for base in bases:
+        if cfg := getattr(base, "meta_config", None):
+            config.update(cfg.copy())
+
+    config.update(attrs.get("meta_config", MetaConfig()))
+
+    for k in list(kwargs.keys()):
+        if k in config_keys:
+            config[k] = kwargs.pop(k)
+        if k == "db":
+            config["database"] = kwargs.pop(k)
+
+    return config
 
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(Field, FieldInfo))
@@ -82,45 +114,45 @@ class MetaDocument(ModelMetaclass):
         attrs: dict[str, Any],
         **kwargs: Any,
     ) -> Any:
-        meta = MetaConfig
+        # 跳过基类
+        if bases == (BaseModel,):
+            return super().__new__(cls, cname, bases, attrs, **kwargs)
 
-        for base in reversed(bases):
-            if base != BaseModel and issubclass(base, Document):
-                meta = inherit_meta(base.__meta__, MetaConfig)
+        # 合并配置
+        attrs["meta_config"] = merge_config(bases, attrs, kwargs)
 
-        kwargs.setdefault("database", kwargs.pop("db", None))
-
-        allowed_meta_kwargs = {
-            key
-            for key in dir(meta)
-            if not (key.startswith("__") and key.endswith("__"))
-        }
-        meta_kwargs = {
-            key: kwargs.pop(key) for key in kwargs.keys() & allowed_meta_kwargs
-        }
-
-        attrs["__meta__"] = inherit_meta(attrs.get("Meta"), meta, **meta_kwargs)
-        attrs["__encoder__"] = Encoder.create(attrs["__meta__"].bson_encoders)
+        # 创建编码器
+        attrs["__encoder__"] = Encoder.create(attrs["meta_config"].get("bson_encoders"))
 
         scls = super().__new__(cls, cname, bases, attrs, **kwargs)
 
-        # 由于此处代码使用了 setattr，导致子类重写父类的字段时会引发错误，暂无解决办法
-        # NameError: Field name "xxx" shadows a BaseModel attribute;
-        # use a different field name with "alias='xxx'".
-        for fname, field in scls.__fields__.items():
-            setattr(scls, fname, ExpressionField(field, []))
-            if isinstance(finfo := field.field_info, FieldInfo) and finfo.primary_key:
-                pk = finfo.alias or fname
-                if getattr(scls, "__primary_key__", pk) != pk:
-                    raise ValueError("文档的主键应唯一")
-                finfo.allow_mutation = False
-                scls.__primary_key__ = pk
+        # 设置模型字段
+        annotations = attrs.get("__annotations__", {})
+        for fname in annotations:
+            field = scls.model_fields[fname]
+            setattr(scls, fname, ExpressionField(fname, field, []))
 
-        if not hasattr(scls, "__primary_key__") and is_need_default_pk(
-            bases, attrs.get("__annotations__")
-        ):
+        # 检查主键是否唯一
+        pk_fields = {
+            fname: field
+            for fname, field in scls.model_fields.items()
+            if isinstance(field, FieldInfo) and field.primary_key
+        }
+        if len(pk_fields) > 1:
+            raise ValueError(
+                f"文档的主键应唯一, 当前有主键字段: {', '.join(pk_fields.keys())}"
+            )
+
+        # 设置显式主键
+        if len(pk_fields) == 1:
+            pk_name, pk_filed = next(iter(pk_fields.items()))
+            scls.__primary_key__ = pk_filed.alias or pk_name
+
+        # 设置默认主键
+        if not pk_fields and is_need_default_pk(bases, annotations):
             set_default_pk(scls)
 
+        # 注册模型
         Mango.register_model(scls)
 
         return scls
@@ -136,9 +168,9 @@ class MetaEmbeddedDocument(ModelMetaclass):
         **kwargs: Any,
     ) -> Any:
         scls = super().__new__(cls, name, bases, attrs, **kwargs)
-        for fname, field in scls.__fields__.items():
-            setattr(scls, fname, ExpressionField(field, []))
-            if isinstance(finfo := field.field_info, FieldInfo) and finfo.primary_key:
+        for fname, field in scls.model_fields.items():
+            setattr(scls, fname, ExpressionField(fname, field, []))
+            if isinstance(field, FieldInfo) and field.primary_key:
                 raise ValueError("内嵌文档不可设置主键")
         return scls
 
@@ -146,8 +178,7 @@ class MetaEmbeddedDocument(ModelMetaclass):
 class Document(BaseModel, metaclass=MetaDocument):
     if TYPE_CHECKING:  # pragma: no cover
         id: ClassVar[ObjectId]
-        __fields__: ClassVar[dict[str, ModelField]]
-        __meta__: ClassVar[type[MetaConfig]]
+        model_fields: ClassVar[dict[str, FieldInfo]]
         __encoder__: ClassVar[CodecOptions]
         __collection__: ClassVar[Collection]
         __primary_key__: ClassVar[str]
@@ -158,10 +189,10 @@ class Document(BaseModel, metaclass=MetaDocument):
             name: str | None = None,
             db: Database | str | None = None,
             **kwargs: Any,
-        ) -> None:
-            ...
+        ) -> None: ...
 
-    Meta = MetaConfig
+    meta_config: ClassVar[MetaConfig] = MetaConfig()
+    model_config = ConfigDict(validate_assignment=True)
 
     @property
     def pk(self) -> Any:
@@ -200,8 +231,9 @@ class Document(BaseModel, metaclass=MetaDocument):
 
     def doc(self, **kwargs: Any) -> dict[str, Any]:
         """转换为 MongoDB 文档"""
-        kwargs["by_alias"] = self.__meta__.by_alias
-        data = self.dict(**kwargs)
+        if by_alias := self.meta_config.get("by_alias"):
+            kwargs.setdefault("by_alias", by_alias)
+        data = self.model_dump(**kwargs)
         pk = self.__primary_key__
         exclude = kwargs.get("exclude")
         if not (exclude and pk in exclude):
@@ -209,11 +241,12 @@ class Document(BaseModel, metaclass=MetaDocument):
         return bson.decode(bson.encode(data, codec_options=self.__encoder__))
 
     @classmethod
-    def from_doc(cls, document: dict[str, Any]) -> Self:
+    def from_doc(cls, document: Mapping[str, Any]) -> Self:
         """从文档构建模型实例"""
+        doc = dict(document)
         with contextlib.suppress(KeyError):
-            document[cls.__primary_key__] = document.pop("_id")
-        return cls(**document)
+            doc[cls.__primary_key__] = doc.pop("_id")
+        return cls(**doc)
 
     @classmethod
     async def save_all(cls, *documents: Self) -> None:
@@ -259,10 +292,6 @@ class Document(BaseModel, metaclass=MetaDocument):
         model = cls.from_doc(data)
         return await model.save()
 
-    class Config:
-        validate_assignment = True
-
 
 class EmbeddedDocument(BaseModel, metaclass=MetaEmbeddedDocument):
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
-from pydantic.fields import ModelField
+from pydantic._internal import _repr
 from typing_extensions import Self
 
 from mango.fields import FieldInfo
@@ -43,15 +43,16 @@ class Operators(Enum):
 
 class ExpressionField:
     def __init__(
-        self, field: ModelField, parents: list[tuple[str, "Document"]]
+        self, name: str, field: FieldInfo, parents: list[tuple[str, "Document"]]
     ) -> None:
-        self.field = field
-        self.parents = parents
+        self.__name = name
+        self.__field = field
+        self.__parents = parents
 
-    def __eq__(self, other: Any) -> "Expression":
+    def __eq__(self, other: object) -> "Expression":
         return OPR(self).eq(other)
 
-    def __ne__(self, other: Any) -> "Expression":
+    def __ne__(self, other: object) -> "Expression":
         return OPR(self).ne(other)
 
     def __lt__(self, other: Any) -> "Expression":
@@ -70,25 +71,26 @@ class ExpressionField:
         return super().__hash__()
 
     def __repr__(self) -> str:
-        return f"ExpressionField(name={self!s}, type={self.field._type_display()})"
+        annotation = _repr.PlainRepr(_repr.display_as_type(self.__field.annotation))
+        return f"ExpressionField(name={self!s}, type={annotation})"
 
     def __str__(self) -> str:
-        names = [p[0] for p in self.parents]
-        if isinstance(finfo := self.field.field_info, FieldInfo) and finfo.primary_key:
+        names = [p[0] for p in self.__parents]
+        if isinstance(self.__field, FieldInfo) and self.__field.primary_key:
             names.append("_id")
         else:
-            names.append(self.field.name)
+            names.append(self.__name)
         return ".".join(names)
 
     def __getattr__(self, name: str) -> Any:
         """内嵌查询反向查找分配父级"""
-        attr = getattr(self.field.outer_type_, name)
-        if isinstance(attr, self.__class__):
-            new_parent = (self.field.name, self.field.outer_type_)
-            if new_parent not in attr.parents:
-                attr.parents.append(new_parent)
-            if new_parents := list(set(self.parents) - set(attr.parents)):
-                attr.parents = new_parents + attr.parents
+        attr = object.__getattribute__(self.__field.annotation, name)
+        if isinstance(attr, self.__class__) and self.__field.annotation:
+            new_parent = (self.__name, self.__field.annotation)
+            if new_parent not in attr.__parents:
+                attr.__parents.append(new_parent)
+            if new_parents := list(set(self.__parents) - set(attr.__parents)):
+                attr.__parents = new_parents + attr.__parents
         return attr
 
 
@@ -98,10 +100,10 @@ class Expression:
     operator: Operators
     value: Any
 
-    def __or__(self, other: Self) -> Self:
+    def __or__(self, other: Self) -> "Expression":
         return OPR.or_(self, other)
 
-    def __and__(self, other: Self) -> Self:
+    def __and__(self, other: Self) -> "Expression":
         return OPR.and_(self, other)
 
     def __repr__(self) -> str:
@@ -168,13 +170,13 @@ class OPR:
 
     @classmethod
     def nor(cls, *expressions: Expression | bool) -> Expression:
-        """既不……也不……"""
+        """既不也不"""
         merge = cls._merge(Operators.NOR, expressions)
         return Expression(None, *merge)
 
     @classmethod
     def _merge(
-        cls, operator: Operators, expressions: tuple[Expression | bool]
+        cls, operator: Operators, expressions: tuple[Expression | bool, ...]
     ) -> tuple[Operators, list[Expression]]:
         merge_expr: list[Expression] = []
         for expression in expressions:

@@ -4,12 +4,13 @@ from types import UnionType
 from typing import TYPE_CHECKING, Any
 
 import pydantic
-from pydantic.fields import ModelField
 
 from mango.fields import FieldInfo
 from mango.index import Index, IndexType
 
 if TYPE_CHECKING:  # pragma: no cover
+    from pydantic import BaseModel
+
     from mango.models import Document
 
 
@@ -62,21 +63,18 @@ def validate_fields(
     model: type["Document"], input_data: dict[str, Any]
 ) -> dict[str, Any]:
     """验证模型的指定字段"""
-    if miss := set(input_data) - set(model.__fields__):
+    if miss := set(input_data) - set(model.model_fields):
         raise ValueError(f"这些字段在 {model.__name__} 中不存在: {miss}")
 
     fields = {
-        k: (v.outer_type_, v.field_info)
-        for k, v in model.__fields__.items()
+        k: (v.annotation, v.get_default())
+        for k, v in model.model_fields.items()
         if k in input_data
     }
-    new_model = pydantic.create_model(model.__name__, **fields)
-    values, _, validation_error = pydantic.validate_model(new_model, input_data)
+    new_model: "BaseModel" = pydantic.create_model(model.__name__, **fields)  # type: ignore
+    new_model.model_validate(input_data)
 
-    if validation_error:
-        raise validation_error
-
-    return values
+    return input_data
 
 
 def add_fields(model: type["Document"], **field_definitions: Any) -> None:
@@ -84,7 +82,7 @@ def add_fields(model: type["Document"], **field_definitions: Any) -> None:
 
     来源见: https://github.com/pydantic/pydantic/issues/1937
     """
-    new_fields: dict[str, ModelField] = {}
+    new_fields: dict[str, FieldInfo] = {}
     new_annotations: dict[str, type | None] = {}
 
     for f_name, f_def in field_definitions.items():
@@ -100,37 +98,34 @@ def add_fields(model: type["Document"], **field_definitions: Any) -> None:
         else:
             f_annotation, f_value = None, f_def
 
+        if not isinstance(f_value, dict):
+            f_value = {"default": f_value}
+
         if f_annotation:
             new_annotations[f_name] = f_annotation
 
-        new_fields[f_name] = ModelField.infer(
-            name=f_name,
-            value=f_value,
-            annotation=f_annotation,
-            class_validators=None,
-            config=model.__config__,
-        )
+        new_fields[f_name] = FieldInfo(annotation=f_annotation, **f_value)
 
-    model.__fields__.update(new_fields)
+    model.model_fields.update(new_fields)
     model.__annotations__.update(new_annotations)
+    model.model_rebuild(force=True)
 
 
 def get_indexes(model: type["Document"]) -> Generator[Index, None, None]:
     """获取模型中定义的索引, 包括字段与元配置"""
-    for name, field in model.__fields__.items():
-        finfo = field.field_info
-        if isinstance(finfo, FieldInfo):
-            if index := finfo.index:
+    for name, field in model.model_fields.items():
+        if isinstance(field, FieldInfo):
+            if index := field.index:
                 if index is True:
                     yield Index(name)
                 elif isinstance(index, IndexType):
                     yield Index((name, index))
                 else:
                     yield index
-            elif (expire := finfo.expire) is not None:
+            elif (expire := field.expire) is not None:
                 yield Index(name, expireAfterSeconds=expire)
 
-    for index in model.__meta__.indexes:
+    for index in model.meta_config.get("indexes", []):
         if isinstance(index, str):
             yield Index(index)
         elif isinstance(index, Sequence):

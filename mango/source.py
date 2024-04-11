@@ -10,9 +10,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 async def init_model(model: type["Document"], *, revise_index: bool = False) -> None:
     """初始化文档模型"""
-    meta = model.__meta__
-    db = Client.get_database(meta.database)
-    model.__collection__ = db[meta.name or to_snake_case(model.__name__)]
+    meta = model.meta_config
+    db = Client.get_database(meta.get("database"))
+    model.__collection__ = db[meta.get("name") or to_snake_case(model.__name__)]
     await init_index(model, revise_index=revise_index)
 
 

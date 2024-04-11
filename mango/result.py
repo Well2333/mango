@@ -30,7 +30,7 @@ class FindOptions(BaseModel):
     sort: list[SortType] = []
 
     def kwdict(self, *exclude: str) -> dict[str, Any]:
-        return self.dict(exclude=set(exclude), exclude_defaults=True)
+        return self.model_dump(exclude=set(exclude), exclude_defaults=True)
 
 
 class FindResult(Generic[T_Model]):
@@ -68,9 +68,9 @@ class FindResult(Generic[T_Model]):
         compiled: dict[str, Any] = {}
         for condition in self._filter:
             if isinstance(condition, Mapping):
-                condition = dict(condition)
+                condition = dict(condition)  # noqa: PLW2901
             elif isinstance(condition, Expression):
-                condition = condition.struct()
+                condition = condition.struct()  # noqa: PLW2901
             else:
                 raise TypeError("查询过滤条件不正确, 应为映射或表达式")
             compiled |= self._compile(condition)
@@ -83,7 +83,7 @@ class FindResult(Generic[T_Model]):
         compiled: dict[str, Any] = {}
 
         for key, value in source.items():
-            key = str(key)
+            key = str(key)  # noqa: PLW2901
             if isinstance(value, Expression):
                 compiled[key] = value.struct()
             elif isinstance(value, Mapping):
@@ -92,9 +92,9 @@ class FindResult(Generic[T_Model]):
                 compiled[key] = []
                 for i in value:
                     if isinstance(i, Expression):
-                        i = i.struct()
+                        i = i.struct()  # noqa: PLW2901
                     if isinstance(i, Mapping):
-                        i = self._compile(i)
+                        i = self._compile(i)  # noqa: PLW2901
                     compiled[key].append(i)
             else:
                 compiled[key] = value
@@ -125,7 +125,9 @@ class FindResult(Generic[T_Model]):
             try:
                 key, direction = str(key), Order(direction)
             except ValueError as e:
-                raise TypeError("键应为字符串或字段, 排序方向应为 Order 枚举成员") from e
+                raise TypeError(
+                    "键应为字符串或字段, 排序方向应为 Order 枚举成员"
+                ) from e
             else:
                 self.options.sort.append((key, direction))
 
@@ -178,13 +180,13 @@ class AggregateResult:
     def __init__(self, cursor: AsyncIOMotorLatentCommandCursor) -> None:
         self.cursor = cursor
 
-    def __await__(self) -> Generator[None, None, list[dict[str, Any]]]:
+    def __await__(self) -> Generator[None, None, list[Mapping[str, Any]]]:
         """
         `await` : 等待时，将返回聚合管道的结果文档列表
         """
         return (yield from self.cursor.to_list(length=None).__await__())
 
-    async def __aiter__(self) -> AsyncGenerator[dict[str, Any], None]:
+    async def __aiter__(self) -> AsyncGenerator[Mapping[str, Any], None]:
         """`async for`: 异步迭代聚合管道的结果文档"""
         async for document in self.cursor:  # type: ignore
             yield document

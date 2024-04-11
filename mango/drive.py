@@ -41,7 +41,7 @@ class Database:
         try:
             return self.collections[name]
         except KeyError:
-            collection: AsyncIOMotorCollection = self.db.get_collection(name)
+            collection = self.db.get_collection(name)
             self.collections[name] = Collection(collection)
             return self.collections[name]
 
@@ -86,7 +86,7 @@ class Client:
         try:
             return self.databases[name]
         except KeyError:
-            db: AsyncIOMotorDatabase = self.client.get_database(name)
+            db = self.client.get_database(name)
             self.databases[name] = Database(db)
             return self.databases[name]
 
@@ -120,7 +120,7 @@ class Client:
 
         if isinstance(db, Database):
             return db
-        return client[db] if isinstance(db, str) else client.default_database
+        return client[db] if db else client.default_database
 
     @property
     def default_database(self) -> Database:
@@ -140,5 +140,5 @@ class Client:
         return self.client.PORT
 
     @property
-    def address(self) -> tuple[str, int]:
+    def address(self) -> tuple[str, int] | None:
         return self.client.address
